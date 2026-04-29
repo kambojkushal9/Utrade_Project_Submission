@@ -1,46 +1,53 @@
 #include "OrderBook.h"
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
 
 using namespace std;
 
-void OrderBook::addOrder(const string& orderId, Side side, double price, uint64_t quantity, OrderType type) {
-    if (quantity == 0) return;
+vector<Trade> OrderBook::addOrder(Order order) {
+    vector<Trade> trades;
+    if (order.quantity == 0) return trades;
 
-    // Self-trade prevention (Reject duplicate Order IDs)
-    if (orders.find(orderId) != orders.end()) {
-        cerr << "Rejected: Order ID " << orderId << " already exists.\n";
-        return;
+    // Reject duplicate Order IDs across the whole engine/book
+    if (orders.find(order.orderId) != orders.end()) {
+        cerr << "[ERROR] Rejected: Order ID " << order.orderId << " already exists.\n";
+        return trades;
     }
 
-    Order newOrder(orderId, side, price, quantity, type, ++currentTimestamp);
+    order.timestamp = ++currentTimestamp;
 
-    if (type == OrderType::FOK) {
-        if (!canFullyFill(side, price, quantity)) {
+    if (order.type == OrderType::FOK) {
+        if (!canFullyFill(order.side, order.price, order.quantity)) {
             // Killed immediately
-            return;
+            cout << "[KILLED] FOK Order " << order.orderId << " killed (no liquidity).\n";
+            return trades;
         }
     }
 
-    if (type == OrderType::MARKET || price == 0) {
-        matchMarketOrder(newOrder);
+    if (order.type == OrderType::MARKET || order.price == 0.0) {
+        matchMarketOrder(order, trades);
     } else {
-        matchLimitOrder(newOrder);
+        matchLimitOrder(order, trades);
     }
 
     // Add remaining to book if not FOK/IOC and still has quantity
-    if (newOrder.quantity > 0 && newOrder.type == OrderType::LIMIT) {
-        if (newOrder.side == Side::BUY) {
-            bids[newOrder.price].push_back(newOrder);
-            orders[newOrder.orderId] = {newOrder.side, newOrder.price, --bids[newOrder.price].end()};
+    if (order.quantity > 0 && order.type == OrderType::LIMIT) {
+        if (order.side == Side::BUY) {
+            bids[order.price].push_back(order);
+            orders[order.orderId] = {order.side, order.price, --bids[order.price].end()};
         } else {
-            asks[newOrder.price].push_back(newOrder);
-            orders[newOrder.orderId] = {newOrder.side, newOrder.price, --asks[newOrder.price].end()};
+            asks[order.price].push_back(order);
+            orders[order.orderId] = {order.side, order.price, --asks[order.price].end()};
         }
+    } else if (order.quantity > 0 && order.type == OrderType::IOC) {
+        cout << "[CANCELED] IOC Order " << order.orderId << " canceled remaining " << order.quantity << "\n";
     }
+
+    return trades;
 }
 
-void OrderBook::cancelOrder(const string& orderId) {
+bool OrderBook::cancelOrder(const string& orderId) {
     auto it = orders.find(orderId);
     if (it != orders.end()) {
         Side side = it->second.side;
@@ -59,10 +66,12 @@ void OrderBook::cancelOrder(const string& orderId) {
             }
         }
         orders.erase(it);
+        return true;
     }
+    return false;
 }
 
-void OrderBook::matchLimitOrder(Order& order) {
+void OrderBook::matchLimitOrder(Order& order, vector<Trade>& trades) {
     if (order.side == Side::BUY) {
         while (order.quantity > 0 && !asks.empty()) {
             auto bestAsk = asks.begin();
@@ -71,20 +80,29 @@ void OrderBook::matchLimitOrder(Order& order) {
             }
 
             auto& orderList = bestAsk->second;
-            while (order.quantity > 0 && !orderList.empty()) {
-                auto restingOrderIt = orderList.begin();
+            auto restingOrderIt = orderList.begin();
+            while (order.quantity > 0 && restingOrderIt != orderList.end()) {
+                // Self-Trade Prevention (Cancel Resting)
+                if (order.traderId == restingOrderIt->traderId) {
+                    cout << "[STP] Self-trade prevented. Canceling resting order " << restingOrderIt->orderId << "\n";
+                    orders.erase(restingOrderIt->orderId);
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                    continue;
+                }
+
                 uint64_t tradeQuantity = min(order.quantity, restingOrderIt->quantity);
                 double tradePrice = restingOrderIt->price;
 
-                cout << "TRADE " << order.orderId << " " << restingOrderIt->orderId 
-                     << " " << fixed << setprecision(2) << tradePrice << " " << tradeQuantity << "\n";
+                trades.emplace_back(restingOrderIt->orderId, order.orderId, symbol, tradePrice, tradeQuantity);
 
                 order.quantity -= tradeQuantity;
                 restingOrderIt->quantity -= tradeQuantity;
 
                 if (restingOrderIt->quantity == 0) {
                     orders.erase(restingOrderIt->orderId);
-                    orderList.pop_front();
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                } else {
+                    ++restingOrderIt;
                 }
             }
 
@@ -100,20 +118,29 @@ void OrderBook::matchLimitOrder(Order& order) {
             }
 
             auto& orderList = bestBid->second;
-            while (order.quantity > 0 && !orderList.empty()) {
-                auto restingOrderIt = orderList.begin();
+            auto restingOrderIt = orderList.begin();
+            while (order.quantity > 0 && restingOrderIt != orderList.end()) {
+                // Self-Trade Prevention (Cancel Resting)
+                if (order.traderId == restingOrderIt->traderId) {
+                    cout << "[STP] Self-trade prevented. Canceling resting order " << restingOrderIt->orderId << "\n";
+                    orders.erase(restingOrderIt->orderId);
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                    continue;
+                }
+
                 uint64_t tradeQuantity = min(order.quantity, restingOrderIt->quantity);
                 double tradePrice = restingOrderIt->price;
 
-                cout << "TRADE " << restingOrderIt->orderId << " " << order.orderId 
-                     << " " << fixed << setprecision(2) << tradePrice << " " << tradeQuantity << "\n";
+                trades.emplace_back(restingOrderIt->orderId, order.orderId, symbol, tradePrice, tradeQuantity);
 
                 order.quantity -= tradeQuantity;
                 restingOrderIt->quantity -= tradeQuantity;
 
                 if (restingOrderIt->quantity == 0) {
                     orders.erase(restingOrderIt->orderId);
-                    orderList.pop_front();
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                } else {
+                    ++restingOrderIt;
                 }
             }
 
@@ -124,26 +151,34 @@ void OrderBook::matchLimitOrder(Order& order) {
     }
 }
 
-void OrderBook::matchMarketOrder(Order& order) {
+void OrderBook::matchMarketOrder(Order& order, vector<Trade>& trades) {
     if (order.side == Side::BUY) {
         while (order.quantity > 0 && !asks.empty()) {
             auto bestAsk = asks.begin();
             auto& orderList = bestAsk->second;
 
-            while (order.quantity > 0 && !orderList.empty()) {
-                auto restingOrderIt = orderList.begin();
+            auto restingOrderIt = orderList.begin();
+            while (order.quantity > 0 && restingOrderIt != orderList.end()) {
+                if (order.traderId == restingOrderIt->traderId) {
+                    cout << "[STP] Self-trade prevented. Canceling resting order " << restingOrderIt->orderId << "\n";
+                    orders.erase(restingOrderIt->orderId);
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                    continue;
+                }
+
                 uint64_t tradeQuantity = min(order.quantity, restingOrderIt->quantity);
                 double tradePrice = restingOrderIt->price;
 
-                cout << "TRADE " << order.orderId << " " << restingOrderIt->orderId 
-                     << " " << fixed << setprecision(2) << tradePrice << " " << tradeQuantity << "\n";
+                trades.emplace_back(restingOrderIt->orderId, order.orderId, symbol, tradePrice, tradeQuantity);
 
                 order.quantity -= tradeQuantity;
                 restingOrderIt->quantity -= tradeQuantity;
 
                 if (restingOrderIt->quantity == 0) {
                     orders.erase(restingOrderIt->orderId);
-                    orderList.pop_front();
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                } else {
+                    ++restingOrderIt;
                 }
             }
 
@@ -156,20 +191,28 @@ void OrderBook::matchMarketOrder(Order& order) {
             auto bestBid = bids.begin();
             auto& orderList = bestBid->second;
 
-            while (order.quantity > 0 && !orderList.empty()) {
-                auto restingOrderIt = orderList.begin();
+            auto restingOrderIt = orderList.begin();
+            while (order.quantity > 0 && restingOrderIt != orderList.end()) {
+                if (order.traderId == restingOrderIt->traderId) {
+                    cout << "[STP] Self-trade prevented. Canceling resting order " << restingOrderIt->orderId << "\n";
+                    orders.erase(restingOrderIt->orderId);
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                    continue;
+                }
+
                 uint64_t tradeQuantity = min(order.quantity, restingOrderIt->quantity);
                 double tradePrice = restingOrderIt->price;
 
-                cout << "TRADE " << restingOrderIt->orderId << " " << order.orderId 
-                     << " " << fixed << setprecision(2) << tradePrice << " " << tradeQuantity << "\n";
+                trades.emplace_back(restingOrderIt->orderId, order.orderId, symbol, tradePrice, tradeQuantity);
 
                 order.quantity -= tradeQuantity;
                 restingOrderIt->quantity -= tradeQuantity;
 
                 if (restingOrderIt->quantity == 0) {
                     orders.erase(restingOrderIt->orderId);
-                    orderList.pop_front();
+                    restingOrderIt = orderList.erase(restingOrderIt);
+                } else {
+                    ++restingOrderIt;
                 }
             }
 
@@ -178,7 +221,9 @@ void OrderBook::matchMarketOrder(Order& order) {
             }
         }
     }
-    // Market orders do not rest in the book. Remaining quantity is discarded.
+    if (order.quantity > 0) {
+        cout << "[CANCELED] Market Order " << order.orderId << " canceled remaining " << order.quantity << " (no liquidity)\n";
+    }
     order.quantity = 0; 
 }
 
@@ -188,6 +233,7 @@ bool OrderBook::canFullyFill(Side side, double price, uint64_t quantity) const {
         for (const auto& askLevel : asks) {
             if (askLevel.first > price) break;
             for (const auto& ord : askLevel.second) {
+                // Approximate STP check for FOK could be added, but skipping for simplicity
                 accumulatedQty += ord.quantity;
                 if (accumulatedQty >= quantity) return true;
             }
@@ -205,9 +251,8 @@ bool OrderBook::canFullyFill(Side side, double price, uint64_t quantity) const {
 }
 
 void OrderBook::printBook() const {
-    cout << "--- Book ---\n";
+    cout << "--- Book for " << symbol << " ---\n";
     
-    // Asks (Print top 5 lowest)
     int count = 0;
     for (auto it = asks.begin(); it != asks.end() && count < 5; ++it, ++count) {
         uint64_t totalQty = 0;
@@ -216,7 +261,6 @@ void OrderBook::printBook() const {
     }
     if (asks.empty()) cout << "ASK: (empty)\n";
 
-    // Bids (Print top 5 highest)
     count = 0;
     for (auto it = bids.begin(); it != bids.end() && count < 5; ++it, ++count) {
         uint64_t totalQty = 0;
@@ -227,7 +271,7 @@ void OrderBook::printBook() const {
 }
 
 void OrderBook::printBBO() const {
-    cout << "[BBO] ";
+    cout << "[BBO " << symbol << "] ";
     if (!bids.empty()) {
         uint64_t totalQty = 0;
         for (const auto& o : bids.begin()->second) totalQty += o.quantity;

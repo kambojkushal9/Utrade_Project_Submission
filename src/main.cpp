@@ -1,4 +1,4 @@
-#include "OrderBook.h"
+#include "MatchingEngine.h"
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -8,8 +8,25 @@
 
 using namespace std;
 
+// Fast string parsing utility (zero-allocation for tokens)
+vector<string_view> split(string_view s, char delim) {
+    vector<string_view> tokens;
+    size_t start = 0;
+    size_t end = s.find(delim);
+    while (end != string_view::npos) {
+        if (end != start) {
+            tokens.push_back(s.substr(start, end - start));
+        }
+        start = end + 1;
+        end = s.find(delim, start);
+    }
+    if (start < s.length()) {
+        tokens.push_back(s.substr(start));
+    }
+    return tokens;
+}
+
 int main(int argc, char* argv[]) {
-    OrderBook engine;
     bool printBBO = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -18,6 +35,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    MatchingEngine engine(printBBO);
     string line;
     uint64_t processedOrders = 0;
 
@@ -26,29 +44,30 @@ int main(int argc, char* argv[]) {
     while (getline(cin, line)) {
         if (line.empty()) continue;
 
-        istringstream iss(line);
-        string cmdOrId;
-        iss >> cmdOrId;
+        auto tokens = split(line, ' ');
+        if (tokens.empty()) continue;
+
+        string_view cmdOrId = tokens[0];
 
         if (cmdOrId == "CANCEL") {
-            string orderId;
-            iss >> orderId;
-            engine.cancelOrder(orderId);
-            if (printBBO) engine.printBBO();
+            if (tokens.size() < 2) continue;
+            string orderId(tokens[1]);
+            engine.processCancel(orderId);
         } else {
-            // It's a new order
-            string orderId = cmdOrId;
-            string sideStr;
-            double price;
-            uint64_t quantity;
-            string typeStr = "";
-
-            if (!(iss >> sideStr >> price >> quantity)) {
-                cerr << "Error parsing line: " << line << "\n";
+            // New format: [OrderID] [Symbol] [BUY/SELL] [Price] [Qty] [TraderID] [Optional: Type]
+            if (tokens.size() < 6) {
+                cerr << "[ERROR] Invalid format: " << line << "\n";
                 continue;
             }
 
-            iss >> typeStr; // Optional 5th parameter
+            string orderId(tokens[0]);
+            string symbol(tokens[1]);
+            string_view sideStr = tokens[2];
+            double price = stod(string(tokens[3]));
+            uint64_t quantity = stoull(string(tokens[4]));
+            string traderId(tokens[5]);
+            
+            string_view typeStr = (tokens.size() > 6) ? tokens[6] : "";
 
             Side side = (sideStr == "BUY") ? Side::BUY : Side::SELL;
             OrderType type = OrderType::LIMIT;
@@ -61,8 +80,7 @@ int main(int argc, char* argv[]) {
                 type = OrderType::FOK;
             }
 
-            engine.addOrder(orderId, side, price, quantity, type);
-            if (printBBO) engine.printBBO();
+            engine.processOrder(Order(orderId, symbol, side, price, quantity, traderId, type));
         }
         processedOrders++;
     }
@@ -70,7 +88,8 @@ int main(int argc, char* argv[]) {
     auto endTime = chrono::high_resolution_clock::now();
     chrono::duration<double> diff = endTime - startTime;
 
-    engine.printBook();
+    cout << "\n";
+    engine.printAllBooks();
 
     cout << "\n--- Benchmarks ---\n";
     cout << "Processed " << processedOrders << " instructions in " << diff.count() << " seconds.\n";

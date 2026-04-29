@@ -1,15 +1,20 @@
 #ifndef ORDERBOOK_H
 #define ORDERBOOK_H
 
-#include "Order.h"
+#include "Types.h"
 #include <map>
 #include <list>
 #include <unordered_map>
+#include <vector>
 #include <string>
-#include <iostream>
+
+// Callbacks for events
+#include <functional>
 
 class OrderBook {
 private:
+    std::string symbol;
+    
     // Bids: Highest price first
     std::map<double, std::list<Order>, std::greater<double>> bids;
     // Asks: Lowest price first
@@ -25,12 +30,17 @@ private:
 
     uint64_t currentTimestamp = 0;
 
-    void matchLimitOrder(Order& order);
-    void matchMarketOrder(Order& order);
+    void matchLimitOrder(Order& order, std::vector<Trade>& trades);
+    void matchMarketOrder(Order& order, std::vector<Trade>& trades);
 
 public:
-    void addOrder(const std::string& orderId, Side side, double price, uint64_t quantity, OrderType type = OrderType::LIMIT);
-    void cancelOrder(const std::string& orderId);
+    explicit OrderBook(std::string sym) : symbol(std::move(sym)) {}
+
+    // Process an order and return the trades generated
+    std::vector<Trade> addOrder(Order order);
+    
+    // Cancel an order, returning true if successful
+    bool cancelOrder(const std::string& orderId);
     
     void printBook() const;
     void printBBO() const;
