@@ -1,12 +1,12 @@
 # High-Frequency Limit Order Book (LOB) Engine
 
-A highly efficient, strictly-prioritized in-memory Limit Order Book implemented in Modern C++ (C++17) for the uTrade Solutions Campus Hiring assignment.
+A highly efficient, strictly-prioritized in-memory Limit Order Book implemented in Modern C++ (C++17).
 
 Designed with architecture suitable for high-throughput environments, this implementation showcases advanced C++ concepts, strict adherence to SOLID principles, and real-world trading edge cases like Self-Trade Prevention (STP) and Multi-Instrument support.
 
 ---
 
-## 🚀 Key Features (Top 1% Standards)
+## 🚀 Key Features
 
 ### 1. Multi-Instrument Matching Engine
 Unlike basic implementations that hardcode a single asset, this engine introduces a `MatchingEngine` router layer. It dynamically instantiates and manages multiple `OrderBook` objects (`unordered_map<string, OrderBook>`), allowing seamless trading across AAPL, GOOG, TSLA, and more simultaneously.
